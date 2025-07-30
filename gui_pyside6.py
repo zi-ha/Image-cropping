@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 import threading
+import multiprocessing as mp
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -24,7 +25,7 @@ from PySide6.QtGui import (
     QDropEvent, QPainter, QLinearGradient, QIntValidator
 )
 
-from image_processor import ImageProcessor, ResizeMode
+from image_processor import ImageProcessor, ResizeMode, MultiProcessImageProcessor
 from file_manager import FileManager
 
 
@@ -187,7 +188,7 @@ class ProcessingThread(QThread):
     progress_updated = Signal(float, str, bool)
     processing_finished = Signal(dict)
     
-    def __init__(self, processor, files, output_dir, target_size, mode, quality):
+    def __init__(self, processor, files, output_dir, target_size, mode, quality, use_multiprocessing=False):
         super().__init__()
         self.processor = processor
         self.files = files
@@ -195,6 +196,7 @@ class ProcessingThread(QThread):
         self.target_size = target_size
         self.mode = mode
         self.quality = quality
+        self.use_multiprocessing = use_multiprocessing
     
     def run(self):
         """运行处理任务"""
@@ -215,14 +217,16 @@ class ModernImageResizerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("批量图片尺寸调整工具 - PySide6版")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1200, 850)
         
         # 初始化组件
         self.image_processor = ImageProcessor()
+        self.multiprocess_processor = MultiProcessImageProcessor()
         self.file_manager = FileManager()
         self.selected_files = []
         self.output_directory = ""
         self.processing_thread = None
+        self.use_multiprocessing = True  # 默认启用多进程
         
         self.setup_ui()
         self.setup_styles()
@@ -758,6 +762,90 @@ class ModernImageResizerGUI(QMainWindow):
         quality_layout.addLayout(slider_layout)
         layout.addWidget(quality_container)
         
+        # 多进程设置
+        multiprocess_container = QWidget()
+        multiprocess_layout = QVBoxLayout(multiprocess_container)
+        multiprocess_layout.setSpacing(10)
+        
+        multiprocess_label = QLabel("处理模式")
+        multiprocess_label.setAlignment(Qt.AlignCenter)
+        multiprocess_label.setStyleSheet("QLabel { font-size: 16px; font-weight: bold; color: #555; }")
+        
+        # 多进程选项
+        process_options_layout = QVBoxLayout()
+        process_options_layout.setSpacing(8)
+        
+        self.multiprocess_checkbox = QRadioButton("多进程处理 (推荐)")
+        self.singleprocess_checkbox = QRadioButton("单进程处理")
+        
+        # 默认选择多进程
+        self.multiprocess_checkbox.setChecked(True)
+        
+        checkbox_style = """
+            QRadioButton {
+                font-size: 14px;
+                font-weight: bold;
+                color: #555;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QRadioButton::indicator:unchecked {
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                background-color: white;
+            }
+            QRadioButton::indicator:checked {
+                border: 2px solid #28a745;
+                border-radius: 8px;
+                background-color: #28a745;
+            }
+        """
+        
+        self.multiprocess_checkbox.setStyleSheet(checkbox_style)
+        self.singleprocess_checkbox.setStyleSheet(checkbox_style)
+        
+        # 进程数设置
+        workers_layout = QHBoxLayout()
+        workers_layout.setSpacing(10)
+        
+        workers_label = QLabel("进程数:")
+        workers_label.setStyleSheet("QLabel { font-size: 14px; color: #666; }")
+        
+        self.workers_spinbox = QSpinBox()
+        self.workers_spinbox.setRange(1, 16)
+        self.workers_spinbox.setValue(self.multiprocess_processor.max_workers)
+        self.workers_spinbox.setStyleSheet("""
+            QSpinBox {
+                font-size: 14px;
+                padding: 6px;
+                border: 2px solid #ddd;
+                border-radius: 4px;
+                background-color: white;
+            }
+            QSpinBox:focus {
+                border-color: #28a745;
+            }
+        """)
+        
+        cpu_info_label = QLabel(f"(CPU核心数: {mp.cpu_count()}, 默认: {self.multiprocess_processor.max_workers})")
+        cpu_info_label.setStyleSheet("QLabel { font-size: 12px; color: #888; }")
+        
+        workers_layout.addWidget(workers_label)
+        workers_layout.addWidget(self.workers_spinbox)
+        workers_layout.addWidget(cpu_info_label)
+        workers_layout.addStretch()
+        
+        process_options_layout.addWidget(self.multiprocess_checkbox)
+        process_options_layout.addWidget(self.singleprocess_checkbox)
+        process_options_layout.addLayout(workers_layout)
+        
+        multiprocess_layout.addWidget(multiprocess_label)
+        multiprocess_layout.addLayout(process_options_layout)
+        layout.addWidget(multiprocess_container)
+        
         # 添加弹性空间
         layout.addStretch()
         
@@ -828,6 +916,10 @@ class ModernImageResizerGUI(QMainWindow):
         self.width_input.textChanged.connect(self.update_file_table)
         self.height_input.textChanged.connect(self.update_file_table)
         self.quality_slider.valueChanged.connect(self.update_quality_label)
+        
+        # 多进程设置
+        self.multiprocess_checkbox.toggled.connect(self.on_multiprocess_toggled)
+        self.workers_spinbox.valueChanged.connect(self.on_workers_changed)
         
         # 处理控制
         self.start_btn.clicked.connect(self.start_processing)
@@ -936,6 +1028,15 @@ class ModernImageResizerGUI(QMainWindow):
         """更新质量标签"""
         self.quality_label.setText(f"{value}%")
     
+    def on_multiprocess_toggled(self, checked):
+        """多进程选项切换"""
+        self.use_multiprocessing = checked
+        self.workers_spinbox.setEnabled(checked)
+    
+    def on_workers_changed(self, value):
+        """进程数改变"""
+        self.multiprocess_processor.max_workers = value
+    
     def validate_inputs(self) -> bool:
         """验证输入"""
         if not self.selected_files:
@@ -983,13 +1084,16 @@ class ModernImageResizerGUI(QMainWindow):
         self.progress_bar.setValue(0)
         
         # 创建处理线程
+        processor = self.multiprocess_processor if self.use_multiprocessing else self.image_processor
+        
         self.processing_thread = ProcessingThread(
-            self.image_processor,
+            processor,
             self.selected_files,
             self.output_directory,
             (target_width, target_height),
             resize_mode,
-            quality
+            quality,
+            self.use_multiprocessing
         )
         
         # 连接信号
@@ -1021,6 +1125,13 @@ class ModernImageResizerGUI(QMainWindow):
 总文件数：{result['total']}
 成功处理：{result['processed']}
 处理失败：{result['failed']}"""
+        
+        # 添加多进程相关信息
+        if 'processing_time' in result:
+            message += f"\n处理时间：{result['processing_time']:.2f} 秒"
+        
+        if 'workers_used' in result:
+            message += f"\n使用进程数：{result['workers_used']}"
         
         if result['failed_files']:
             message += f"\n\n失败的文件："
