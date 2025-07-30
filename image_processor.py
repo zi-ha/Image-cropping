@@ -141,10 +141,15 @@ def process_single_image_worker(args):
     """
     多进程工作函数 - 处理单张图片
     这个函数需要在模块级别定义以支持pickle序列化
+    增强了PyInstaller打包后的兼容性
     """
     input_path, output_path, target_size, mode, quality = args
     
     try:
+        # 确保导入在函数内部，避免打包后的导入问题
+        from PIL import Image, ImageOps
+        import os
+        
         with Image.open(input_path) as img:
             # 处理EXIF旋转信息，避免图片旋转问题
             img = ImageOps.exif_transpose(img)
@@ -155,6 +160,9 @@ def process_single_image_worker(args):
             
             # 调整尺寸
             target_width, target_height = target_size
+            
+            # 导入ResizeMode枚举
+            from image_processor import ResizeMode
             
             if mode == ResizeMode.STRETCH:
                 # 直接拉伸
@@ -175,14 +183,20 @@ def process_single_image_worker(args):
                 processed_img = ImageOps.fit(img, (target_width, target_height), 
                                           Image.Resampling.LANCZOS)
             
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+            
             # 保存图片
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             processed_img.save(output_path, quality=quality, optimize=True)
             
             return True, input_path, None
             
     except Exception as e:
-        return False, input_path, str(e)
+        # 详细的错误信息，便于调试
+        error_msg = f"处理图片时出错: {str(e)}"
+        return False, input_path, error_msg
 
 
 class MultiProcessImageProcessor:
